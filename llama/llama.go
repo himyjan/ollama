@@ -3,12 +3,12 @@ package llama
 /*
 #cgo CFLAGS: -O2 -std=c11 -DGGML_BUILD=1 -DNDEBUG -DLOG_DISABLE_LOGS -DGGML_USE_LLAMAFILE
 #cgo CXXFLAGS: -O2 -std=c++11 -DGGML_BUILD=1 -DNDEBUG -DLOG_DISABLE_LOGS -DGGML_USE_LLAMAFILE
-#cgo darwin,arm64 CFLAGS: -DGGML_USE_METAL -DGGML_USE_ACCELERATE -DGGML_METAL_EMBED_LIBRARY -DACCELERATE_NEW_LAPACK -DACCELERATE_LAPACK_ILP64 -DGGML_USE_BLAS -mmacosx-version-min=11.3
-#cgo darwin,arm64 CXXFLAGS: -DGGML_USE_METAL -DGGML_USE_ACCELERATE -DGGML_METAL_EMBED_LIBRARY -DACCELERATE_NEW_LAPACK -DACCELERATE_LAPACK_ILP64 -DGGML_USE_BLAS -mmacosx-version-min=11.3
-#cgo darwin,arm64 LDFLAGS: -framework Foundation -framework Metal -framework MetalKit -framework Accelerate -mmacosx-version-min=11.3
-#cgo darwin,amd64 CFLAGS: -Wno-incompatible-pointer-types-discards-qualifiers -mmacosx-version-min=11.3
-#cgo darwin,amd64 CXXFLAGS: -Wno-incompatible-pointer-types-discards-qualifiers -mmacosx-version-min=11.3
-#cgo darwin,amd64 LDFLAGS: -framework Foundation -mmacosx-version-min=11.3
+#cgo darwin,arm64 CFLAGS: -DGGML_USE_METAL -DGGML_USE_ACCELERATE -DGGML_METAL_EMBED_LIBRARY -DACCELERATE_NEW_LAPACK -DACCELERATE_LAPACK_ILP64 -DGGML_USE_BLAS
+#cgo darwin,arm64 CXXFLAGS: -DGGML_USE_METAL -DGGML_USE_ACCELERATE -DGGML_METAL_EMBED_LIBRARY -DACCELERATE_NEW_LAPACK -DACCELERATE_LAPACK_ILP64 -DGGML_USE_BLAS
+#cgo darwin,arm64 LDFLAGS: -framework Foundation -framework Metal -framework MetalKit -framework Accelerate
+#cgo darwin,amd64 CFLAGS: -Wno-incompatible-pointer-types-discards-qualifiers
+#cgo darwin,amd64 CXXFLAGS: -Wno-incompatible-pointer-types-discards-qualifiers
+#cgo darwin,amd64 LDFLAGS: -framework Foundation
 #cgo darwin,amd64,avx2 CFLAGS: -DGGML_USE_ACCELERATE -DACCELERATE_NEW_LAPACK -DACCELERATE_LAPACK_ILP64
 #cgo darwin,amd64,avx2 CXXFLAGS: -DGGML_USE_ACCELERATE -DACCELERATE_NEW_LAPACK -DACCELERATE_LAPACK_ILP64
 #cgo darwin,amd64,avx2 LDFLAGS: -framework Accelerate
@@ -115,24 +115,6 @@ func (c *Context) Model() *Model {
 
 func (c *Context) GetLogitsIth(i int) []float32 {
 	return unsafe.Slice((*float32)(unsafe.Pointer(C.llama_get_logits_ith(c.c, C.int(i)))), c.Model().NumVocab())
-}
-
-func (c *Context) SampleTokenGreedy(logits []float32) int {
-	candidates := (*C.struct_llama_token_data)(C.malloc(C.size_t(len(logits)) * C.size_t(unsafe.Sizeof(C.struct_llama_token_data{}))))
-	defer C.free(unsafe.Pointer(candidates))
-
-	for i, logit := range logits {
-		ptr := (*C.struct_llama_token_data)(unsafe.Pointer(uintptr(unsafe.Pointer(candidates)) + uintptr(i)*unsafe.Sizeof(C.struct_llama_token_data{})))
-		ptr.id = C.int(i)
-		ptr.logit = C.float(logit)
-		ptr.p = 0.0
-	}
-
-	return int(C.llama_sample_token_greedy(c.c, &C.llama_token_data_array{
-		data:   candidates,
-		size:   C.size_t(len(logits)),
-		sorted: C.bool(false),
-	}))
 }
 
 func (c *Context) KvCacheSeqAdd(seqId int, p0 int, p1 int, delta int) {
@@ -445,7 +427,7 @@ func NewLlavaImageEmbed(llamaContext *Context, clipContext *ClipContext, data []
 // sampling
 // TODO: this is a temporary wrapper to allow calling C++ code from CGo
 type SamplingContext struct {
-	c *C.struct_llama_sampling_context
+	c *C.struct_gpt_sampler
 }
 
 type SamplingParams struct {
@@ -467,8 +449,8 @@ type SamplingParams struct {
 	Grammar        string
 }
 
-func NewSamplingContext(params SamplingParams) *SamplingContext {
-	var cparams C.struct_llama_sampling_cparams
+func NewSamplingContext(model *Model, params SamplingParams) *SamplingContext {
+	var cparams C.struct_gpt_sampler_cparams
 	cparams.top_k = C.int32_t(params.TopK)
 	cparams.top_p = C.float(params.TopP)
 	cparams.min_p = C.float(params.MinP)
@@ -489,25 +471,20 @@ func NewSamplingContext(params SamplingParams) *SamplingContext {
 	defer C.free(unsafe.Pointer(grammar))
 
 	cparams.grammar = grammar
-	context := &SamplingContext{c: C.llama_sampling_cinit(&cparams)}
-	runtime.SetFinalizer(context, func(s *SamplingContext) { C.llama_sampling_cfree(s.c) })
+	context := &SamplingContext{c: C.gpt_sampler_cinit(model.c, &cparams)}
+	runtime.SetFinalizer(context, func(s *SamplingContext) { C.gpt_sampler_cfree(s.c) })
 
 	return context
 }
 
 func (s *SamplingContext) Reset() {
-	C.llama_sampling_creset(s.c)
+	C.gpt_sampler_creset(s.c)
 }
 
-func (s *SamplingContext) Sample(ctxMain *Context, ctxConfig *Context, idx int) int {
-	// TODO (jmorganca): handle nil for all args
-	if ctxConfig == nil {
-		return int(C.llama_sampling_csample(s.c, ctxMain.c, nil, C.int(idx)))
-	}
-
-	return int(C.llama_sampling_csample(s.c, ctxMain.c, ctxConfig.c, C.int(idx)))
+func (s *SamplingContext) Sample(llamaContext *Context, idx int) int {
+	return int(C.gpt_sampler_csample(s.c, llamaContext.c, C.int(idx)))
 }
 
-func (s *SamplingContext) Accept(ctxMain *Context, id int, applyGrammar bool) {
-	C.llama_sampling_caccept(s.c, ctxMain.c, C.llama_token(id), C.bool(applyGrammar))
+func (s *SamplingContext) Accept(id int, applyGrammar bool) {
+	C.gpt_sampler_caccept(s.c, C.llama_token(id), C.bool(applyGrammar))
 }
